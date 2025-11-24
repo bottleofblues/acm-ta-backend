@@ -79,29 +79,109 @@ export async function GET() {
 
 // --- Main Coach (POST) ---
 export async function POST(req) {
-  // 1) Parse body
   let body = {};
   try {
     body = await req.json();
-  } catch {
-    // ignore
+  } catch (_) {
+    body = {};
   }
 
   const { prompt = "", profile = {} } = body;
 
-  // 2) If no API key, fall back to a safe stub
+  // If the key is missing, stay in “safe stub” mode
   if (!process.env.OPENAI_API_KEY) {
-    return json(
+    return Response.json({
+      ok: true,
+      mode: "stub",
+      received: { prompt, profile },
+      note: "OpenAI key missing. Add OPENAI_API_KEY to .env.local and restart server."
+    });
+  }
+
+  // ---- Build learner context from the profile sent by the frontend ----
+  // This assumes your welcome page stored fields like these in localStorage (acm_init_v1):
+  const {
+    personal_site_urls = "",
+    linkedin = "",
+    job_description_text = "",
+    day90_outcomes = ""
+  } = profile || {};
+
+  let learnerContext = "";
+
+  if (linkedin && typeof linkedin === "string" && linkedin.trim()) {
+    learnerContext += `LinkedIn profile (or excerpt):\n${linkedin.trim()}\n\n`;
+  }
+
+  if (job_description_text && typeof job_description_text === "string" && job_description_text.trim()) {
+    learnerContext += `New role job description:\n${job_description_text.trim()}\n\n`;
+  }
+
+  if (day90_outcomes && typeof day90_outcomes === "string" && day90_outcomes.trim()) {
+    learnerContext += `Stated Day 90 outcomes:\n${day90_outcomes.trim()}\n\n`;
+  }
+
+  if (personal_site_urls && typeof personal_site_urls === "string" && personal_site_urls.trim()) {
+    learnerContext += `Personal website URLs:\n${personal_site_urls.trim()}\n\n`;
+  }
+
+  // This "userContent" will contain:
+  // - the context we just built
+  // - the TRA + journal summary that the frontend already put into "prompt"
+  const userContent = `
+Learner context (from onboarding):
+${learnerContext || "(minimal context provided)"}
+
+Current exercise input (Transition Risk Assessment / journal):
+${prompt}
+`.trim();
+
+  try {
+    const client = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY
+    });
+
+    const response = await client.responses.create({
+      model: "gpt-4.1-mini",
+      input: [
+        {
+          role: "system",
+          content: systemPrompt
+        },
+        {
+          role: "user",
+          content: userContent
+        }
+      ]
+    });
+
+    // Extract assistant text from Responses API
+    let replyText = "";
+    const msg = response.output[0];
+    if (msg && msg.content && Array.isArray(msg.content)) {
+      replyText = msg.content.map(part => part.text || "").join("\n").trim();
+    } else {
+      // Fallback if structure changes
+      replyText = JSON.stringify(response, null, 2);
+    }
+
+    return Response.json({
+      ok: true,
+      mode: "openai",
+      reply: replyText
+    });
+  } catch (err) {
+    console.error("ACM Coach error:", err);
+    return Response.json(
       {
-        ok: true,
-        mode: "stub",
-        reply:
-          "ACM TA is not fully connected right now (missing API key), but here’s a generic nudge: pick 1–2 risks from your assessment, define a small visible win for the next 7 days, and schedule a check-in with your boss to align expectations.",
-        received: { prompt, profile },
+        ok: false,
+        error: "coach_error",
+        message: "ACM TA had trouble generating feedback. Please try again shortly."
       },
-      { status: 200 }
+      { status: 500 }
     );
   }
+}
 
   // 3) Build contextual coaching prompt
   const profileContext = buildProfileContext(profile);
